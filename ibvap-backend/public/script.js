@@ -173,7 +173,10 @@ if (clearHistoryBtn) {
             try {
                 const response = await fetch('https://ibvap-1-xmfb.onrender.com/api/incidents', { method: 'DELETE' });
                 const result = await response.json();
-                if (result.success) console.log("🗑️ History deleted from Database.");
+                if (result.success) {
+                    console.log("🗑️ History deleted from Database.");
+                    if (window.resetAITracking) window.resetAITracking(); // 🔄 Reset AI IDs
+                }
             } catch (error) {
                 console.error("Error clearing history:", error);
             }
@@ -186,10 +189,11 @@ socket.on('clear_ui', () => {
     alertCounter = 0; 
     if (alertCountBadge) alertCountBadge.innerText = '0';
     if (noAlertsMsg) noAlertsMsg.style.display = 'block'; 
+    if (window.resetAITracking) window.resetAITracking(); // 🔄 Reset AI IDs
 });
 
 // ==========================================
-// 4. REAL IN-BROWSER AI (TRACKING ID + SMART ALERTS)
+// 4. REAL IN-BROWSER AI (TRACKING ID + SMART ALERTS + RE-ENTRY)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
@@ -200,6 +204,13 @@ let isDetecting = false;
 // Tracking State
 let trackers = [];
 let nextTrackId = 1;
+
+// Global Reset Function for Testing
+window.resetAITracking = () => {
+    trackers = [];
+    nextTrackId = 1;
+    console.log("🔄 Tracking state & IDs reset for testing!");
+};
 
 const PERMANENT_ZONE = [
     [120, 80], [520, 80], [520, 400], [120, 400]
@@ -289,19 +300,17 @@ async function detectFrame() {
             }
         }
 
-        // Only process the most confident detection to avoid ghost boxes
         if (rawDetections.length > 1) rawDetections.sort((a, b) => b.prob - a.prob);
         let activeDetections = rawDetections.length > 0 ? [rawDetections[0]] : [];
 
         // --- CENTROID TRACKING LOGIC ---
         let currentTracks = [];
-        
         for (let det of activeDetections) {
             let cx = det.x + (det.w / 2);
             let cy = det.y + (det.h / 2);
             
             let matchedTrack = null;
-            let minDist = 150; // max distance to be considered same person
+            let minDist = 150;
 
             for (let t of trackers) {
                 let dist = Math.hypot(cx - t.cx, cy - t.cy);
@@ -324,7 +333,7 @@ async function detectFrame() {
 
         for (let t of trackers) {
             t.missedFrames++;
-            if (t.missedFrames < 15) currentTracks.push(t); // Keep ID alive for a few frames if person blinks out
+            if (t.missedFrames < 15) currentTracks.push(t); 
         }
         trackers = currentTracks;
 
@@ -340,7 +349,7 @@ async function detectFrame() {
         ctx.fillStyle = "orange"; ctx.font = "bold 14px Arial"; ctx.fillText("RESTRICTED AREA", 125, 95);
 
         for (let t of trackers) {
-            if (t.missedFrames > 0) continue; // Don't draw if temporarily missed
+            if (t.missedFrames > 0) continue; 
             
             let isInZone = isPointInPolygon([t.cx, t.cy], PERMANENT_ZONE);
 
@@ -366,7 +375,9 @@ async function detectFrame() {
                     ctx.fillText(`⚠️ ID:${t.id} TIME: ${timeLeft}s`, t.box.x, t.box.y - 10);
                 }
             } else {
-                t.zoneEnterTime = null; // Reset timer if they leave zone
+                t.zoneEnterTime = null; 
+                t.alertSent = false; // 🔄 KEY CHANGE: Zone chhodte hi alert status reset
+                
                 ctx.strokeStyle = "#22c55e"; ctx.lineWidth = 2;
                 ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
                 ctx.fillStyle = "#22c55e"; ctx.font = "bold 16px Arial";
