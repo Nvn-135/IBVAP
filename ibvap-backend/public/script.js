@@ -189,16 +189,26 @@ socket.on('clear_ui', () => {
 });
 
 // ==========================================
-// 4. REAL IN-BROWSER AI (YOLOv8 + VIRTUAL FENCING)
+// 4. REAL IN-BROWSER AI (PERMANENT ZONE + 3 SEC DWELL TIME)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
 const ctx = outputCanvas.getContext('2d');
 let mySession;
 let isDetecting = false;
-let lastAlertTime = 0; 
 
-// Helper: Point-in-Polygon Algorithm (Check if person is inside drawn zone)
+let lastAlertTime = 0; 
+let intrusionStartTime = 0; 
+let isCurrentlyIntruding = false;
+
+// Hardcoded Permanent Zone (Center of the 640x480 feed)
+const PERMANENT_ZONE = [
+    [120, 80],   // Top-Left
+    [520, 80],   // Top-Right
+    [520, 400],  // Bottom-Right
+    [120, 400]   // Bottom-Left
+];
+
 function isPointInPolygon(point, polygon) {
     let x = point[0], y = point[1];
     let inside = false;
@@ -227,7 +237,6 @@ async function startWebcam() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
         video.srcObject = stream;
         video.play();
-        
         video.addEventListener('loadeddata', () => {
             console.log("🎥 Webcam Started! AI Inference Active...");
             detectFrame();
@@ -245,7 +254,6 @@ async function detectFrame() {
     }
     isDetecting = true;
 
-    // 1. Prepare Image for YOLOv8
     const offCanvas = document.createElement('canvas');
     offCanvas.width = 640;
     offCanvas.height = 640;
@@ -263,7 +271,6 @@ async function detectFrame() {
     const tensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
 
     try {
-        // 2. Run Inference
         const inputName = mySession.inputNames[0];
         const outputName = mySession.outputNames[0];
         const results = await mySession.run({ [inputName]: tensor });
@@ -271,7 +278,6 @@ async function detectFrame() {
         
         let detections = [];
         
-        // 3. Parse Tensors
         for (let i = 0; i < 8400; i++) {
             let maxProb = 0;
             let classId = -1;
@@ -296,62 +302,77 @@ async function detectFrame() {
             }
         }
 
-        // 4. Draw & Zone Logic
         ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
         ctx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
         
+        // DRAW PERMANENT ZONE
+        ctx.strokeStyle = "rgba(255, 165, 0, 0.8)"; 
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(PERMANENT_ZONE[0][0], PERMANENT_ZONE[0][1]);
+        for(let i=1; i<PERMANENT_ZONE.length; i++) ctx.lineTo(PERMANENT_ZONE[i][0], PERMANENT_ZONE[i][1]);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255, 165, 0, 0.2)";
+        ctx.fill();
+        ctx.fillStyle = "orange";
+        ctx.font = "bold 14px Arial";
+        ctx.fillText("RESTRICTED AREA", 125, 95);
+
         if (detections.length > 0) {
             detections.sort((a, b) => b.prob - a.prob);
             let best = detections[0];
             
-            // Check if person's feet (bottom center of box) is inside any drawn zone
-            let feetX = best.x + (best.w / 2);
-            let feetY = best.y + best.h;
-            let isInZone = false;
+            // Check intersection using the CENTER of the bounding box
+            let boxCenterX = best.x + (best.w / 2);
+            let boxCenterY = best.y + (best.h / 2);
+            
+            let isInZone = isPointInPolygon([boxCenterX, boxCenterY], PERMANENT_ZONE);
 
-            if (allZones.length > 0) {
-                for (let zone of allZones) {
-                    if (isPointInPolygon([feetX, feetY], zone)) {
-                        isInZone = true;
-                        break;
+            if (isInZone) {
+                if (!isCurrentlyIntruding) {
+                    isCurrentlyIntruding = true;
+                    intrusionStartTime = Date.now();
+                }
+
+                let dwellTime = Date.now() - intrusionStartTime;
+
+                if (dwellTime >= 3000) {
+                    // Scenario A: Inside zone for > 3 Seconds (CRITICAL ALERT)
+                    ctx.strokeStyle = "#ef4444"; 
+                    ctx.lineWidth = 4;
+                    ctx.strokeRect(best.x, best.y, best.w, best.h);
+                    ctx.fillStyle = "#ef4444";
+                    ctx.font = "bold 18px Arial";
+                    ctx.fillText(`🚨 INTRUDER CONFIRMED`, best.x, best.y - 10);
+                    
+                    if (Date.now() - lastAlertTime > 15000) { // 15-second cooldown
+                        lastAlertTime = Date.now();
+                        sendRealAlert(best.prob);
                     }
+                } else {
+                    // Scenario B: Inside zone, counting down (WARNING)
+                    let timeLeft = (3 - (dwellTime/1000)).toFixed(1);
+                    ctx.strokeStyle = "#eab308"; 
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(best.x, best.y, best.w, best.h);
+                    ctx.fillStyle = "#eab308";
+                    ctx.font = "bold 16px Arial";
+                    ctx.fillText(`⚠️ WARNING: ${timeLeft}s`, best.x, best.y - 10);
                 }
-            }
-
-            if (allZones.length === 0) {
-                // Scenario A: No zones drawn yet
-                ctx.strokeStyle = "#3b82f6"; // Blue Box
-                ctx.lineWidth = 3;
-                ctx.strokeRect(best.x, best.y, best.w, best.h);
-                ctx.fillStyle = "#3b82f6";
-                ctx.font = "bold 16px Arial";
-                ctx.fillText(`PERSON DETECTED (DRAW ZONE TO RESTRICT)`, best.x, best.y - 10);
-            } 
-            else if (isInZone) {
-                // Scenario B: Person inside restricted zone (RED + ALERT)
-                ctx.strokeStyle = "#ef4444"; 
-                ctx.lineWidth = 3;
-                ctx.strokeRect(best.x, best.y, best.w, best.h);
-                ctx.fillStyle = "#ef4444";
-                ctx.font = "bold 18px Arial";
-                ctx.fillText(`INTRUDER ${(best.prob*100).toFixed(0)}%`, best.x, best.y - 10);
-                
-                // Fire Alert (max 1 per 10 seconds)
-                if (Date.now() - lastAlertTime > 10000) {
-                    lastAlertTime = Date.now();
-                    sendRealAlert(best.prob);
-                }
-            } 
-            else {
-                // Scenario C: Person outside restricted zone (GREEN + SAFE)
+            } else {
+                // Scenario C: Outside Zone (SAFE)
+                isCurrentlyIntruding = false;
                 ctx.strokeStyle = "#22c55e"; 
-                ctx.lineWidth = 3;
+                ctx.lineWidth = 2;
                 ctx.strokeRect(best.x, best.y, best.w, best.h);
                 ctx.fillStyle = "#22c55e";
-                ctx.font = "bold 18px Arial";
-                ctx.fillText(`SAFE (OUTSIDE ZONE)`, best.x, best.y - 10);
+                ctx.font = "bold 16px Arial";
+                ctx.fillText(`SAFE (OUTSIDE)`, best.x, best.y - 10);
             }
-        } 
+        } else {
+            isCurrentlyIntruding = false;
+        }
     } catch (e) {
         console.error("AI Error: ", e);
     }
@@ -365,10 +386,10 @@ async function sendRealAlert(confidence) {
     
     const payload = {
         object_type: "PERSON",
-        zone_type: "Virtual Edge Zone",
+        zone_type: "Permanent Restricted Zone",
         risk_level: "CRITICAL",
         confidence: confidence,
-        explanation: "In-Browser Edge AI detected unauthorized human movement inside restricted zone.",
+        explanation: "Intruder lingered in the restricted zone for over 3 seconds.",
         snapshot: snapBase64
     };
     
@@ -378,11 +399,10 @@ async function sendRealAlert(confidence) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        console.log("🚨 Real Alert Sent to Backend and Broadcasted!");
+        console.log("📸 Snapshot taken & Alert Sent!");
     } catch (err) {
         console.error("Alert failed:", err);
     }
 }
 
-// Start Process
 loadAIModel();
