@@ -189,14 +189,27 @@ socket.on('clear_ui', () => {
 });
 
 // ==========================================
-// 4. REAL IN-BROWSER AI (YOLOv8 ONNX TENSOR PROCESSING)
+// 4. REAL IN-BROWSER AI (YOLOv8 + VIRTUAL FENCING)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
 const ctx = outputCanvas.getContext('2d');
 let mySession;
 let isDetecting = false;
-let lastAlertTime = 0; // Spam rokne ke liye timer
+let lastAlertTime = 0; 
+
+// Helper: Point-in-Polygon Algorithm (Check if person is inside drawn zone)
+function isPointInPolygon(point, polygon) {
+    let x = point[0], y = point[1];
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        let xi = polygon[i][0], yi = polygon[i][1];
+        let xj = polygon[j][0], yj = polygon[j][1];
+        let intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
 
 async function loadAIModel() {
     console.log("⏳ Loading YOLOv8 Model...");
@@ -232,21 +245,20 @@ async function detectFrame() {
     }
     isDetecting = true;
 
-    // 1. Prepare 640x640 Image Array for YOLOv8
+    // 1. Prepare Image for YOLOv8
     const offCanvas = document.createElement('canvas');
     offCanvas.width = 640;
     offCanvas.height = 640;
     const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
-    offCtx.drawImage(video, 0, 0, 640, 640); // YOLO needs exact 640x640
+    offCtx.drawImage(video, 0, 0, 640, 640); 
     
     const imgData = offCtx.getImageData(0, 0, 640, 640).data;
     const float32Data = new Float32Array(3 * 640 * 640);
     
-    // Convert to RGB & Normalize (0.0 to 1.0)
     for (let i = 0; i < imgData.length / 4; i++) {
-        float32Data[i] = imgData[i * 4] / 255.0;                     // R
-        float32Data[640 * 640 + i] = imgData[i * 4 + 1] / 255.0;     // G
-        float32Data[2 * 640 * 640 + i] = imgData[i * 4 + 2] / 255.0; // B
+        float32Data[i] = imgData[i * 4] / 255.0;                     
+        float32Data[640 * 640 + i] = imgData[i * 4 + 1] / 255.0;     
+        float32Data[2 * 640 * 640 + i] = imgData[i * 4 + 2] / 255.0; 
     }
     const tensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
 
@@ -255,29 +267,25 @@ async function detectFrame() {
         const inputName = mySession.inputNames[0];
         const outputName = mySession.outputNames[0];
         const results = await mySession.run({ [inputName]: tensor });
-        const output = results[outputName].data; // Matrix Shape: [1, 84, 8400]
+        const output = results[outputName].data; 
         
         let detections = [];
         
-        // 3. Parse Tensors (Scan 8400 bounding boxes)
+        // 3. Parse Tensors
         for (let i = 0; i < 8400; i++) {
             let maxProb = 0;
             let classId = -1;
-            
-            
             for (let c = 0; c < 80; c++) {
                 let prob = output[(c + 4) * 8400 + i];
                 if (prob > maxProb) { maxProb = prob; classId = c; }
             }
             
-            // Class 0 = Person. 
-            if (maxProb > 0.60 && classId === 0) { 
+            if (maxProb > 0.60 && classId === 0) { // Person detected
                 let cx = output[0 * 8400 + i];
                 let cy = output[1 * 8400 + i];
                 let w = output[2 * 8400 + i];
                 let h = output[3 * 8400 + i];
                 
-                // Scale back mapping 
                 detections.push({ 
                     x: cx - (w / 2), 
                     y: (cy - (h / 2)) * (480 / 640), 
@@ -288,45 +296,70 @@ async function detectFrame() {
             }
         }
 
-        // 4. Draw to Screen
+        // 4. Draw & Zone Logic
         ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
         ctx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
         
         if (detections.length > 0) {
-            // Sirf best/highest confidence wala box lo (NMS bypass)
             detections.sort((a, b) => b.prob - a.prob);
             let best = detections[0];
             
-            // Draw Red Target Box
-            ctx.strokeStyle = "#ef4444"; // Tailwind Red
-            ctx.lineWidth = 3;
-            ctx.strokeRect(best.x, best.y, best.w, best.h);
-            
-            // Draw Label
-            ctx.fillStyle = "#ef4444";
-            ctx.font = "bold 18px Arial";
-            ctx.fillText(`INTRUDER ${(best.prob*100).toFixed(0)}%`, best.x, best.y - 10);
-            
-            // 5. Send Alert to Backend Database! (Ek alert har 10 seconds mein)
-            if (Date.now() - lastAlertTime > 10000) {
-                lastAlertTime = Date.now();
-                sendRealAlert(best.prob);
+            // Check if person's feet (bottom center of box) is inside any drawn zone
+            let feetX = best.x + (best.w / 2);
+            let feetY = best.y + best.h;
+            let isInZone = false;
+
+            if (allZones.length > 0) {
+                for (let zone of allZones) {
+                    if (isPointInPolygon([feetX, feetY], zone)) {
+                        isInZone = true;
+                        break;
+                    }
+                }
             }
-        } else {
-            // Scanning Mode Indicator
-            ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
-            ctx.font = "14px Arial";
-            ctx.fillText("🟢 Scanning for threats...", 15, 30);
-        }
+
+            if (allZones.length === 0) {
+                // Scenario A: No zones drawn yet
+                ctx.strokeStyle = "#3b82f6"; // Blue Box
+                ctx.lineWidth = 3;
+                ctx.strokeRect(best.x, best.y, best.w, best.h);
+                ctx.fillStyle = "#3b82f6";
+                ctx.font = "bold 16px Arial";
+                ctx.fillText(`PERSON DETECTED (DRAW ZONE TO RESTRICT)`, best.x, best.y - 10);
+            } 
+            else if (isInZone) {
+                // Scenario B: Person inside restricted zone (RED + ALERT)
+                ctx.strokeStyle = "#ef4444"; 
+                ctx.lineWidth = 3;
+                ctx.strokeRect(best.x, best.y, best.w, best.h);
+                ctx.fillStyle = "#ef4444";
+                ctx.font = "bold 18px Arial";
+                ctx.fillText(`INTRUDER ${(best.prob*100).toFixed(0)}%`, best.x, best.y - 10);
+                
+                // Fire Alert (max 1 per 10 seconds)
+                if (Date.now() - lastAlertTime > 10000) {
+                    lastAlertTime = Date.now();
+                    sendRealAlert(best.prob);
+                }
+            } 
+            else {
+                // Scenario C: Person outside restricted zone (GREEN + SAFE)
+                ctx.strokeStyle = "#22c55e"; 
+                ctx.lineWidth = 3;
+                ctx.strokeRect(best.x, best.y, best.w, best.h);
+                ctx.fillStyle = "#22c55e";
+                ctx.font = "bold 18px Arial";
+                ctx.fillText(`SAFE (OUTSIDE ZONE)`, best.x, best.y - 10);
+            }
+        } 
     } catch (e) {
         console.error("AI Error: ", e);
     }
 
     isDetecting = false;
-    requestAnimationFrame(detectFrame); // Continuous Loop
+    requestAnimationFrame(detectFrame); 
 }
 
-// Ye function Live frame ka screenshot nikal kar Render API ko bhejegai
 async function sendRealAlert(confidence) {
     const snapBase64 = outputCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
     
@@ -335,7 +368,7 @@ async function sendRealAlert(confidence) {
         zone_type: "Virtual Edge Zone",
         risk_level: "CRITICAL",
         confidence: confidence,
-        explanation: "In-Browser Edge AI detected unauthorized human movement.",
+        explanation: "In-Browser Edge AI detected unauthorized human movement inside restricted zone.",
         snapshot: snapBase64
     };
     
