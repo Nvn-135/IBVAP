@@ -65,7 +65,7 @@ function renderAlertCard(incident) {
 // NEW: Page load hote hi SQLite database se purane alerts fetch karna
 async function loadIncidentHistory() {
     try {
-        const response = await fetch('/api/incidents');
+        const response = await fetch('https://ibvap-1-xmfb.onrender.com/api/incidents');
         const pastIncidents = await response.json();
         
         // Reverse loop taaki sabse naya alert top par aaye
