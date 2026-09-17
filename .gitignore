@@ -1,0 +1,20 @@
+# Node Modules 
+node_modules/
+
+# Local Database Files
+*.db
+ibvap.db
+*.sqlite
+*.sqlite3
+
+# AI Model Weights 
+*.pt
+yolov8n.pt
+
+# VS Code Temp Files 
+tempCodeRunnerFile.*
+
+# Python Cache & Env
+__pycache__/
+*.pyc
+.env
