@@ -189,13 +189,14 @@ socket.on('clear_ui', () => {
 });
 
 // ==========================================
-// 4. IN-BROWSER AI & WEBCAM LOGIC (ONNX)
+// 4. REAL IN-BROWSER AI (YOLOv8 ONNX TENSOR PROCESSING)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
 const ctx = outputCanvas.getContext('2d');
 let mySession;
 let isDetecting = false;
+let lastAlertTime = 0; // Spam rokne ke liye timer
 
 async function loadAIModel() {
     console.log("⏳ Loading YOLOv8 Model...");
@@ -215,7 +216,7 @@ async function startWebcam() {
         video.play();
         
         video.addEventListener('loadeddata', () => {
-            console.log("🎥 Webcam Started! Drawing frames...");
+            console.log("🎥 Webcam Started! AI Inference Active...");
             detectFrame();
         });
     } catch (err) {
@@ -231,32 +232,124 @@ async function detectFrame() {
     }
     isDetecting = true;
 
-    // Draw video to canvas
-    ctx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+    // 1. Prepare 640x640 Image Array for YOLOv8
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = 640;
+    offCanvas.height = 640;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+    offCtx.drawImage(video, 0, 0, 640, 640); // YOLO needs exact 640x640
     
-    // --- YOLOv8 Simplified Inference & Drawing ---
-    // Note: Writing a full YOLOv8 tensor parser in vanilla JS is complex. 
-    // This draws the green/red recording indicator to show the AI pipeline is active.
-    // The server.js Demo Mode handles injecting realistic alert logs for the judges.
+    const imgData = offCtx.getImageData(0, 0, 640, 640).data;
+    const float32Data = new Float32Array(3 * 640 * 640);
     
-    ctx.strokeStyle = "rgba(0, 255, 0, 0.6)";
-    ctx.lineWidth = 4;
-    ctx.strokeRect(0, 0, outputCanvas.width, outputCanvas.height);
+    // Convert to RGB & Normalize (0.0 to 1.0)
+    for (let i = 0; i < imgData.length / 4; i++) {
+        float32Data[i] = imgData[i * 4] / 255.0;                     // R
+        float32Data[640 * 640 + i] = imgData[i * 4 + 1] / 255.0;     // G
+        float32Data[2 * 640 * 640 + i] = imgData[i * 4 + 2] / 255.0; // B
+    }
+    const tensor = new ort.Tensor('float32', float32Data, [1, 3, 640, 640]);
 
-    ctx.fillStyle = "red";
-    ctx.beginPath();
-    ctx.arc(30, 30, 8, 0, 2 * Math.PI);
-    ctx.fill();
-    ctx.fillStyle = "white";
-    ctx.font = "16px Arial";
-    ctx.fillText("LIVE AI EDGE INFERENCE", 45, 35);
-    
-    // Simulate minor processing delay so the browser doesn't freeze
-    await new Promise(r => setTimeout(r, 100)); 
-    
+    try {
+        // 2. Run Inference
+        const inputName = mySession.inputNames[0];
+        const outputName = mySession.outputNames[0];
+        const results = await mySession.run({ [inputName]: tensor });
+        const output = results[outputName].data; // Matrix Shape: [1, 84, 8400]
+        
+        let detections = [];
+        
+        // 3. Parse Tensors (Scan 8400 bounding boxes)
+        for (let i = 0; i < 8400; i++) {
+            let maxProb = 0;
+            let classId = -1;
+            
+            
+            for (let c = 0; c < 80; c++) {
+                let prob = output[(c + 4) * 8400 + i];
+                if (prob > maxProb) { maxProb = prob; classId = c; }
+            }
+            
+            // Class 0 = Person. 
+            if (maxProb > 0.60 && classId === 0) { 
+                let cx = output[0 * 8400 + i];
+                let cy = output[1 * 8400 + i];
+                let w = output[2 * 8400 + i];
+                let h = output[3 * 8400 + i];
+                
+                // Scale back mapping 
+                detections.push({ 
+                    x: cx - (w / 2), 
+                    y: (cy - (h / 2)) * (480 / 640), 
+                    w: w, 
+                    h: h * (480 / 640), 
+                    prob: maxProb 
+                });
+            }
+        }
+
+        // 4. Draw to Screen
+        ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+        ctx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
+        
+        if (detections.length > 0) {
+            // Sirf best/highest confidence wala box lo (NMS bypass)
+            detections.sort((a, b) => b.prob - a.prob);
+            let best = detections[0];
+            
+            // Draw Red Target Box
+            ctx.strokeStyle = "#ef4444"; // Tailwind Red
+            ctx.lineWidth = 3;
+            ctx.strokeRect(best.x, best.y, best.w, best.h);
+            
+            // Draw Label
+            ctx.fillStyle = "#ef4444";
+            ctx.font = "bold 18px Arial";
+            ctx.fillText(`INTRUDER ${(best.prob*100).toFixed(0)}%`, best.x, best.y - 10);
+            
+            // 5. Send Alert to Backend Database! (Ek alert har 10 seconds mein)
+            if (Date.now() - lastAlertTime > 10000) {
+                lastAlertTime = Date.now();
+                sendRealAlert(best.prob);
+            }
+        } else {
+            // Scanning Mode Indicator
+            ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
+            ctx.font = "14px Arial";
+            ctx.fillText("🟢 Scanning for threats...", 15, 30);
+        }
+    } catch (e) {
+        console.error("AI Error: ", e);
+    }
+
     isDetecting = false;
-    requestAnimationFrame(detectFrame);
+    requestAnimationFrame(detectFrame); // Continuous Loop
 }
 
-// Start the Edge AI engine
+// Ye function Live frame ka screenshot nikal kar Render API ko bhejegai
+async function sendRealAlert(confidence) {
+    const snapBase64 = outputCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+    
+    const payload = {
+        object_type: "PERSON",
+        zone_type: "Virtual Edge Zone",
+        risk_level: "CRITICAL",
+        confidence: confidence,
+        explanation: "In-Browser Edge AI detected unauthorized human movement.",
+        snapshot: snapBase64
+    };
+    
+    try {
+        await fetch('https://ibvap-1-xmfb.onrender.com/api/events', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        console.log("🚨 Real Alert Sent to Backend and Broadcasted!");
+    } catch (err) {
+        console.error("Alert failed:", err);
+    }
+}
+
+// Start Process
 loadAIModel();
