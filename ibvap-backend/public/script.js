@@ -1,7 +1,7 @@
 
 // 1. INITIALIZATION & SOCKET CONNECTION
 
-const socket = io("ibvap-production.up.railway.app");
+const socket = io("https://ibvap-production-af08.up.railway.app");
 
 socket.on('connect', () => {
     console.log('✅ Connected to IBVAP Backend successfully.');
