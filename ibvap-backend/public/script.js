@@ -189,7 +189,7 @@ socket.on('clear_ui', () => {
 });
 
 // ==========================================
-// 4. REAL IN-BROWSER AI (PERMANENT ZONE + 3 SEC DWELL TIME)
+// 4. REAL IN-BROWSER AI (TRACKING ID + SMART ALERTS)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
@@ -197,16 +197,12 @@ const ctx = outputCanvas.getContext('2d');
 let mySession;
 let isDetecting = false;
 
-let lastAlertTime = 0; 
-let intrusionStartTime = 0; 
-let isCurrentlyIntruding = false;
+// Tracking State
+let trackers = [];
+let nextTrackId = 1;
 
-// Hardcoded Permanent Zone (Center of the 640x480 feed)
 const PERMANENT_ZONE = [
-    [120, 80],   // Top-Left
-    [520, 80],   // Top-Right
-    [520, 400],  // Bottom-Right
-    [120, 400]   // Bottom-Left
+    [120, 80], [520, 80], [520, 400], [120, 400]
 ];
 
 function isPointInPolygon(point, polygon) {
@@ -243,7 +239,6 @@ async function startWebcam() {
         });
     } catch (err) {
         console.error("❌ Webcam Access Denied", err);
-        alert("Live Demo dekhne ke liye Webcam access allow karein.");
     }
 }
 
@@ -255,8 +250,7 @@ async function detectFrame() {
     isDetecting = true;
 
     const offCanvas = document.createElement('canvas');
-    offCanvas.width = 640;
-    offCanvas.height = 640;
+    offCanvas.width = 640; offCanvas.height = 640;
     const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
     offCtx.drawImage(video, 0, 0, 640, 640); 
     
@@ -276,102 +270,108 @@ async function detectFrame() {
         const results = await mySession.run({ [inputName]: tensor });
         const output = results[outputName].data; 
         
-        let detections = [];
+        let rawDetections = [];
         
         for (let i = 0; i < 8400; i++) {
-            let maxProb = 0;
-            let classId = -1;
+            let maxProb = 0; let classId = -1;
             for (let c = 0; c < 80; c++) {
                 let prob = output[(c + 4) * 8400 + i];
                 if (prob > maxProb) { maxProb = prob; classId = c; }
             }
             
-            if (maxProb > 0.60 && classId === 0) { // Person detected
-                let cx = output[0 * 8400 + i];
-                let cy = output[1 * 8400 + i];
-                let w = output[2 * 8400 + i];
-                let h = output[3 * 8400 + i];
-                
-                detections.push({ 
-                    x: cx - (w / 2), 
-                    y: (cy - (h / 2)) * (480 / 640), 
-                    w: w, 
-                    h: h * (480 / 640), 
-                    prob: maxProb 
+            if (maxProb > 0.60 && classId === 0) { 
+                let cx = output[0 * 8400 + i]; let cy = output[1 * 8400 + i];
+                let w = output[2 * 8400 + i];  let h = output[3 * 8400 + i];
+                rawDetections.push({ 
+                    x: cx - (w / 2), y: (cy - (h / 2)) * (480 / 640), 
+                    w: w, h: h * (480 / 640), prob: maxProb 
                 });
             }
         }
 
+        // Only process the most confident detection to avoid ghost boxes
+        if (rawDetections.length > 1) rawDetections.sort((a, b) => b.prob - a.prob);
+        let activeDetections = rawDetections.length > 0 ? [rawDetections[0]] : [];
+
+        // --- CENTROID TRACKING LOGIC ---
+        let currentTracks = [];
+        
+        for (let det of activeDetections) {
+            let cx = det.x + (det.w / 2);
+            let cy = det.y + (det.h / 2);
+            
+            let matchedTrack = null;
+            let minDist = 150; // max distance to be considered same person
+
+            for (let t of trackers) {
+                let dist = Math.hypot(cx - t.cx, cy - t.cy);
+                if (dist < minDist) { minDist = dist; matchedTrack = t; }
+            }
+
+            if (matchedTrack) {
+                matchedTrack.cx = cx; matchedTrack.cy = cy; matchedTrack.box = det;
+                matchedTrack.missedFrames = 0;
+                trackers = trackers.filter(t => t.id !== matchedTrack.id);
+                currentTracks.push(matchedTrack);
+            } else {
+                currentTracks.push({
+                    id: nextTrackId++,
+                    cx: cx, cy: cy, box: det,
+                    missedFrames: 0, zoneEnterTime: null, alertSent: false
+                });
+            }
+        }
+
+        for (let t of trackers) {
+            t.missedFrames++;
+            if (t.missedFrames < 15) currentTracks.push(t); // Keep ID alive for a few frames if person blinks out
+        }
+        trackers = currentTracks;
+
+        // --- DRAWING & ALERT LOGIC ---
         ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
         ctx.drawImage(video, 0, 0, outputCanvas.width, outputCanvas.height);
         
-        // DRAW PERMANENT ZONE
-        ctx.strokeStyle = "rgba(255, 165, 0, 0.8)"; 
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(PERMANENT_ZONE[0][0], PERMANENT_ZONE[0][1]);
+        ctx.strokeStyle = "rgba(255, 165, 0, 0.8)"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(PERMANENT_ZONE[0][0], PERMANENT_ZONE[0][1]);
         for(let i=1; i<PERMANENT_ZONE.length; i++) ctx.lineTo(PERMANENT_ZONE[i][0], PERMANENT_ZONE[i][1]);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.fillStyle = "rgba(255, 165, 0, 0.2)";
-        ctx.fill();
-        ctx.fillStyle = "orange";
-        ctx.font = "bold 14px Arial";
-        ctx.fillText("RESTRICTED AREA", 125, 95);
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = "rgba(255, 165, 0, 0.2)"; ctx.fill();
+        ctx.fillStyle = "orange"; ctx.font = "bold 14px Arial"; ctx.fillText("RESTRICTED AREA", 125, 95);
 
-        if (detections.length > 0) {
-            detections.sort((a, b) => b.prob - a.prob);
-            let best = detections[0];
+        for (let t of trackers) {
+            if (t.missedFrames > 0) continue; // Don't draw if temporarily missed
             
-            // Check intersection using the CENTER of the bounding box
-            let boxCenterX = best.x + (best.w / 2);
-            let boxCenterY = best.y + (best.h / 2);
-            
-            let isInZone = isPointInPolygon([boxCenterX, boxCenterY], PERMANENT_ZONE);
+            let isInZone = isPointInPolygon([t.cx, t.cy], PERMANENT_ZONE);
 
             if (isInZone) {
-                if (!isCurrentlyIntruding) {
-                    isCurrentlyIntruding = true;
-                    intrusionStartTime = Date.now();
-                }
-
-                let dwellTime = Date.now() - intrusionStartTime;
+                if (!t.zoneEnterTime) t.zoneEnterTime = Date.now();
+                let dwellTime = Date.now() - t.zoneEnterTime;
 
                 if (dwellTime >= 3000) {
-                    // Scenario A: Inside zone for > 3 Seconds (CRITICAL ALERT)
-                    ctx.strokeStyle = "#ef4444"; 
-                    ctx.lineWidth = 4;
-                    ctx.strokeRect(best.x, best.y, best.w, best.h);
-                    ctx.fillStyle = "#ef4444";
-                    ctx.font = "bold 18px Arial";
-                    ctx.fillText(`🚨 INTRUDER CONFIRMED`, best.x, best.y - 10);
+                    ctx.strokeStyle = "#ef4444"; ctx.lineWidth = 4;
+                    ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
+                    ctx.fillStyle = "#ef4444"; ctx.font = "bold 16px Arial";
+                    ctx.fillText(`🚨 ID:${t.id} INTRUDER`, t.box.x, t.box.y - 10);
                     
-                    if (Date.now() - lastAlertTime > 15000) { // 15-second cooldown
-                        lastAlertTime = Date.now();
-                        sendRealAlert(best.prob);
+                    if (!t.alertSent) {
+                        t.alertSent = true;
+                        sendRealAlert(t.box.prob, t.id);
                     }
                 } else {
-                    // Scenario B: Inside zone, counting down (WARNING)
                     let timeLeft = (3 - (dwellTime/1000)).toFixed(1);
-                    ctx.strokeStyle = "#eab308"; 
-                    ctx.lineWidth = 3;
-                    ctx.strokeRect(best.x, best.y, best.w, best.h);
-                    ctx.fillStyle = "#eab308";
-                    ctx.font = "bold 16px Arial";
-                    ctx.fillText(`⚠️ WARNING: ${timeLeft}s`, best.x, best.y - 10);
+                    ctx.strokeStyle = "#eab308"; ctx.lineWidth = 3;
+                    ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
+                    ctx.fillStyle = "#eab308"; ctx.font = "bold 16px Arial";
+                    ctx.fillText(`⚠️ ID:${t.id} TIME: ${timeLeft}s`, t.box.x, t.box.y - 10);
                 }
             } else {
-                // Scenario C: Outside Zone (SAFE)
-                isCurrentlyIntruding = false;
-                ctx.strokeStyle = "#22c55e"; 
-                ctx.lineWidth = 2;
-                ctx.strokeRect(best.x, best.y, best.w, best.h);
-                ctx.fillStyle = "#22c55e";
-                ctx.font = "bold 16px Arial";
-                ctx.fillText(`SAFE (OUTSIDE)`, best.x, best.y - 10);
+                t.zoneEnterTime = null; // Reset timer if they leave zone
+                ctx.strokeStyle = "#22c55e"; ctx.lineWidth = 2;
+                ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
+                ctx.fillStyle = "#22c55e"; ctx.font = "bold 16px Arial";
+                ctx.fillText(`✅ ID:${t.id} SAFE`, t.box.x, t.box.y - 10);
             }
-        } else {
-            isCurrentlyIntruding = false;
         }
     } catch (e) {
         console.error("AI Error: ", e);
@@ -381,15 +381,15 @@ async function detectFrame() {
     requestAnimationFrame(detectFrame); 
 }
 
-async function sendRealAlert(confidence) {
+async function sendRealAlert(confidence, trackId) {
     const snapBase64 = outputCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
     
     const payload = {
-        object_type: "PERSON",
+        object_type: `PERSON (ID: ${trackId})`,
         zone_type: "Permanent Restricted Zone",
         risk_level: "CRITICAL",
         confidence: confidence,
-        explanation: "Intruder lingered in the restricted zone for over 3 seconds.",
+        explanation: `Target ID:${trackId} lingered in the restricted zone for over 3 seconds.`,
         snapshot: snapBase64
     };
     
@@ -399,7 +399,7 @@ async function sendRealAlert(confidence) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        console.log("📸 Snapshot taken & Alert Sent!");
+        console.log(`📸 Alert Sent for ID: ${trackId}`);
     } catch (err) {
         console.error("Alert failed:", err);
     }
