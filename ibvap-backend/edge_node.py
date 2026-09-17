@@ -48,13 +48,13 @@ def on_change_camera(data):
 # 3. CONNECT TO BACKEND & INIT AI
 
 try:
-    sio.connect('http://localhost:8080')
+    sio.connect('ibvap-production.up.railway.app')
 except Exception as e:
     print("❌ Server se connect nahi ho paya. Kya Node.js server chal raha hai?")
 
 print("Loading YOLO model...")
 model = YOLO('yolov8n.pt') 
-API_URL = "http://localhost:8080/api/events"
+API_URL = "ibvap-production.up.railway.app/api/events"
 
 print(f"Starting Camera with source: {camera_source}...")
 cap = cv2.VideoCapture(camera_source)
