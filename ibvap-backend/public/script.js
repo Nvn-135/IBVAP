@@ -162,7 +162,7 @@ document.getElementById('setZoneBtn').addEventListener('click', () => {
             btn.classList.replace('bg-green-600', 'bg-blue-600');
         }, 2000);
     } else {
-        alert("Kam se kam ek polygon draw karein!");
+        alert("Draw atleast one polygon!");
     }
 });
 
@@ -304,7 +304,7 @@ async function detectFrame() {
             }
             
             // 🔄 Yahan filter hataya gaya hai taaki saari 80 classes detect ho sakein
-            if (maxProb > 0.60) { 
+            if (maxProb > 0.30) { 
                 let cx = output[0 * 8400 + i]; let cy = output[1 * 8400 + i];
                 let w = output[2 * 8400 + i];  let h = output[3 * 8400 + i];
                 let detectedName = YOLO_CLASSES[classId].toUpperCase();
