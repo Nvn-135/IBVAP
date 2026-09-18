@@ -193,7 +193,7 @@ socket.on('clear_ui', () => {
 });
 
 // ==========================================
-// 4. REAL IN-BROWSER AI (TRACKING ID + SMART ALERTS + RE-ENTRY)
+// 4. REAL IN-BROWSER AI (ALL OBJECTS + TRACKING + RE-ENTRY)
 // ==========================================
 const video = document.getElementById('webcam');
 const outputCanvas = document.getElementById('output_canvas');
@@ -214,6 +214,19 @@ window.resetAITracking = () => {
 
 const PERMANENT_ZONE = [
     [120, 80], [520, 80], [520, 400], [120, 400]
+];
+
+// YOLOv8 COCO 80 Classes
+const YOLO_CLASSES = [
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse',
+    'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie',
+    'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove',
+    'skateboard', 'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon',
+    'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut',
+    'cake', 'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse',
+    'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book',
+    'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
 ];
 
 function isPointInPolygon(point, polygon) {
@@ -290,17 +303,23 @@ async function detectFrame() {
                 if (prob > maxProb) { maxProb = prob; classId = c; }
             }
             
-            if (maxProb > 0.60 && classId === 0) { 
+            // 🔄 Yahan filter hataya gaya hai taaki saari 80 classes detect ho sakein
+            if (maxProb > 0.60) { 
                 let cx = output[0 * 8400 + i]; let cy = output[1 * 8400 + i];
                 let w = output[2 * 8400 + i];  let h = output[3 * 8400 + i];
+                let detectedName = YOLO_CLASSES[classId].toUpperCase();
+                
                 rawDetections.push({ 
                     x: cx - (w / 2), y: (cy - (h / 2)) * (480 / 640), 
-                    w: w, h: h * (480 / 640), prob: maxProb 
+                    w: w, h: h * (480 / 640), 
+                    prob: maxProb, 
+                    className: detectedName 
                 });
             }
         }
 
         if (rawDetections.length > 1) rawDetections.sort((a, b) => b.prob - a.prob);
+        // Abhi hum performance ke liye sirf sabse confident 1 object track kar rahe hain
         let activeDetections = rawDetections.length > 0 ? [rawDetections[0]] : [];
 
         // --- CENTROID TRACKING LOGIC ---
@@ -314,7 +333,10 @@ async function detectFrame() {
 
             for (let t of trackers) {
                 let dist = Math.hypot(cx - t.cx, cy - t.cy);
-                if (dist < minDist) { minDist = dist; matchedTrack = t; }
+                // Class bhi same honi chahiye (person vs phone)
+                if (dist < minDist && t.box.className === det.className) { 
+                    minDist = dist; matchedTrack = t; 
+                }
             }
 
             if (matchedTrack) {
@@ -352,6 +374,7 @@ async function detectFrame() {
             if (t.missedFrames > 0) continue; 
             
             let isInZone = isPointInPolygon([t.cx, t.cy], PERMANENT_ZONE);
+            let labelText = `${t.box.className} ID:${t.id}`;
 
             if (isInZone) {
                 if (!t.zoneEnterTime) t.zoneEnterTime = Date.now();
@@ -361,27 +384,27 @@ async function detectFrame() {
                     ctx.strokeStyle = "#ef4444"; ctx.lineWidth = 4;
                     ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
                     ctx.fillStyle = "#ef4444"; ctx.font = "bold 16px Arial";
-                    ctx.fillText(`🚨 ID:${t.id} INTRUDER`, t.box.x, t.box.y - 10);
+                    ctx.fillText(`🚨 ${labelText} ALERT!`, t.box.x, t.box.y - 10);
                     
                     if (!t.alertSent) {
                         t.alertSent = true;
-                        sendRealAlert(t.box.prob, t.id);
+                        sendRealAlert(t.box.prob, t.id, t.box.className);
                     }
                 } else {
                     let timeLeft = (3 - (dwellTime/1000)).toFixed(1);
                     ctx.strokeStyle = "#eab308"; ctx.lineWidth = 3;
                     ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
                     ctx.fillStyle = "#eab308"; ctx.font = "bold 16px Arial";
-                    ctx.fillText(`⚠️ ID:${t.id} TIME: ${timeLeft}s`, t.box.x, t.box.y - 10);
+                    ctx.fillText(`⚠️ ${labelText} TIME: ${timeLeft}s`, t.box.x, t.box.y - 10);
                 }
             } else {
                 t.zoneEnterTime = null; 
-                t.alertSent = false; // 🔄 KEY CHANGE: Zone chhodte hi alert status reset
+                t.alertSent = false; 
                 
                 ctx.strokeStyle = "#22c55e"; ctx.lineWidth = 2;
                 ctx.strokeRect(t.box.x, t.box.y, t.box.w, t.box.h);
                 ctx.fillStyle = "#22c55e"; ctx.font = "bold 16px Arial";
-                ctx.fillText(`✅ ID:${t.id} SAFE`, t.box.x, t.box.y - 10);
+                ctx.fillText(`✅ ${labelText} SAFE`, t.box.x, t.box.y - 10);
             }
         }
     } catch (e) {
@@ -392,15 +415,15 @@ async function detectFrame() {
     requestAnimationFrame(detectFrame); 
 }
 
-async function sendRealAlert(confidence, trackId) {
+async function sendRealAlert(confidence, trackId, objectName) {
     const snapBase64 = outputCanvas.toDataURL('image/jpeg', 0.6).split(',')[1];
     
     const payload = {
-        object_type: `PERSON (ID: ${trackId})`,
+        object_type: `${objectName} (ID: ${trackId})`,
         zone_type: "Permanent Restricted Zone",
         risk_level: "CRITICAL",
         confidence: confidence,
-        explanation: `Target ID:${trackId} lingered in the restricted zone for over 3 seconds.`,
+        explanation: `Target ${objectName} (ID:${trackId}) lingered in the restricted zone for over 3 seconds.`,
         snapshot: snapBase64
     };
     
@@ -410,7 +433,7 @@ async function sendRealAlert(confidence, trackId) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        console.log(`📸 Alert Sent for ID: ${trackId}`);
+        console.log(`📸 Alert Sent for ${objectName} ID: ${trackId}`);
     } catch (err) {
         console.error("Alert failed:", err);
     }
