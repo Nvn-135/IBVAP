@@ -213,9 +213,11 @@ window.resetAITracking = () => {
 };
 
 const PERMANENT_ZONE = [
-    [120, 80], [520, 80], [520, 400], [120, 400]
+    [40, 40],   // Top-Left
+    [600, 40],  // Top-Right
+    [600, 440], // Bottom-Right
+    [40, 440]   // Bottom-Left
 ];
-
 // YOLOv8 COCO 80 Classes
 const YOLO_CLASSES = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
